@@ -1,0 +1,12 @@
+# Specim Custom Camera API Requirements
+# =====================================
+
+# Core dependencies
+numpy>=1.19.0
+
+# Optional: for advanced data processing
+# arrayfire>=3.0.0
+
+# Development dependencies (for testing)
+pytest>=6.0.0
+pytest-cov>=2.0.0
