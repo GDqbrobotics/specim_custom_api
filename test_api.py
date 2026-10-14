@@ -67,7 +67,7 @@ def main():
     runner = TestRunner()
 
     print("\n1. Connecting (EYE_Load + EYE_OpenConnectedDevices)")
-    cam = SpecimCameraAPI(dll_dir=r"C:\Program Files\Specim\Specim Insight\1_4_0_83")
+    cam = SpecimCameraAPI()
     cam.set_logging(False)
 
     def connect():

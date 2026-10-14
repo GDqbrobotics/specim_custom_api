@@ -190,12 +190,10 @@ class SpecimCameraAPI:
     def __init__(self, dll_dir: str | None = None):
         """
         Args:
-            dll_dir: folder containing eyeapi.dll. Defaults to the parent of
-                     this file (i.e. the Specim Insight install folder, since
-                     this API folder lives inside it).
+            dll_dir: folder containing eyeapi.dll. Defaults to the folder libs in this directory.
         """
         if dll_dir is None:
-            dll_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            dll_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libs")
         self.dll_dir = os.path.abspath(dll_dir)
         dll_path = os.path.join(self.dll_dir, "eyeapi.dll")
         if not os.path.exists(dll_path):
