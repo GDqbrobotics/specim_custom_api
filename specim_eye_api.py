@@ -195,7 +195,7 @@ class SpecimCameraAPI:
         if dll_dir is None:
             dll_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libs")
         self.dll_dir = os.path.abspath(dll_dir)
-        dll_path = os.path.join(self.dll_dir, "eyeapi.dll")
+        dll_path = os.path.join(self.dll_dir, "eyeapi2.dll")
         if not os.path.exists(dll_path):
             raise FileNotFoundError(
                 f"eyeapi.dll not found in {self.dll_dir}. Pass dll_dir=... "
