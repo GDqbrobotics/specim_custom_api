@@ -69,7 +69,7 @@ def main():
     )
     parser.add_argument(
         "--host",
-        help="camera host for --no-dll (default: 127.0.0.1)",
+        help="camera host for --no-dll (default: 192.168.7.2, the USB bridge address)",
     )
     parser.add_argument(
         "--debug",
@@ -92,7 +92,7 @@ def main():
     runner = TestRunner()
 
     if args.no_dll:
-        host = args.host or "127.0.0.1"
+        host = args.host or "192.168.7.2"
         print(f"\n1. Connecting to {host}:5001 (raw JSON-RPC; no DLL)")
         cam = EyeJsonRpc(host=host)
     else:

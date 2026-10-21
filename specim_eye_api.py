@@ -125,15 +125,20 @@ class EyeError(RuntimeError):
 
 
 # Feature name -> (type, description). Type is one of
-# "float", "int", "string", "bool". From the feature table in insight.exe.
+# "float", "int", "string", "bool".
+# Extracted from the feature table in SpecimIQ Studio's eyeapi.dll (IQ SDK).
 KNOWN_FEATURES = {
+    # --- identity / connectivity -------------------------------------------
     "Camera.Model": ("string", "camera model name"),
     "Camera.SerialNumber": ("string", "camera serial number"),
-    "Camera.ExposureTime": ("float", "integration/exposure time (µs)"),
-    "Camera.ExposureTime.Auto": ("int", "auto exposure on/off"),
-    "Camera.FrameRate": ("float", "line/frame rate (Hz)"),
-    "Camera.Count": ("int", "number of lines/frames to record"),
+    "Camera.IsConnected": ("bool", "camera link up?"),
+    "Camera.Setup": ("string", "camera setup string"),
+    "Camera.Resolution": ("string", "current resolution"),
+    "Camera.BaudRate": ("int", "serial/ASCII baud rate"),
     "Camera.LinesPerFrame": ("int", "lines per frame (area scan)"),
+    "Sensor.SerialNumber": ("string", "sensor serial number"),
+    "Sensor.Detector.Type": ("string", "detector type"),
+    # --- image -------------------------------------------------------------
     "Camera.Image.Width": ("int", "image width (pixels)"),
     "Camera.Image.Height": ("int", "image height (lines)"),
     "Camera.Image.SizePixels": ("int", "image size in pixels"),
@@ -149,21 +154,34 @@ KNOWN_FEATURES = {
     "Camera.BlackLevel": ("float", "black level"),
     "Camera.Gain": ("float", "gain"),
     "Camera.FWHM": ("float", "full width half maximum"),
+    "Camera.LightMeter": ("float", "light meter value"),
     "Camera.Wavelength.Start": ("float", "start wavelength (nm)"),
     "Camera.Wavelength.Stop": ("float", "stop wavelength (nm)"),
     "Camera.Binning.Spatial": ("int", "spatial binning"),
     "Camera.Binning.Spectral": ("int", "spectral binning"),
     "Camera.Binning.Average": ("int", "average binning"),
     "Camera.Binning.HardwareModes": ("string", "available HW binning modes"),
-    "Camera.Trigger.Mode": ("string", "trigger mode (e.g. Internal/External)"),
-    "Camera.Dataout.Mode": ("string", "data output mode"),
+    "Camera.MROI.Enable": ("int", "multi ROI enable"),
+    "Camera.MROI.Clear": ("int", "clear MROI settings"),
+    "Camera.MROI.Mode": ("string", "MROI mode"),
+    "Camera.MROI.Regions": ("int", "MROI region count"),
+    "Camera.MROI.Left": ("int", "MROI left"),
+    "Camera.MROI.Top": ("int", "MROI top"),
+    "Camera.MROI.Width": ("int", "MROI width"),
+    "Camera.MROI.Height": ("int", "MROI height"),
+    # --- shutter / trigger / acquisition -----------------------------------
     "Camera.Shutter.IsOpen": ("bool", "shutter open?"),
+    "Camera.Shutter.IsConnected": ("bool", "shutter connected?"),
     "Camera.ShutterSweepTime": ("float", "shutter sweep time"),
     "Camera.CloseShutter": ("int", "close shutter (set 1)"),
     "Camera.OpenShutter": ("int", "open shutter (set 1)"),
-    "Camera.IsConnected": ("bool", "camera link up?"),
-    "Camera.LightMeter": ("float", "light meter value"),
+    "Camera.Trigger.Mode": ("string", "trigger mode (e.g. Internal/External)"),
+    "Camera.Dataout.Mode": ("string", "data output mode"),
     "Camera.FrameQueue.Length": ("int", "frames waiting in camera queue"),
+    "Camera.Count": ("int", "number of frames to record"),
+    "Camera.ExposureTime": ("float", "integration/exposure time (µs)"),
+    "Camera.ExposureTime.Auto": ("int", "auto exposure on/off"),
+    "Camera.FrameRate": ("float", "frame rate (Hz)"),
     "Acquisition.Start": ("int", "set 1 to start acquisition"),
     "Acquisition.Stop": ("int", "set 1 to stop acquisition"),
     "Acquisition.Acquiring": ("bool", "acquisition running?"),
@@ -171,14 +189,72 @@ KNOWN_FEATURES = {
     "Acquisition.Error": ("string", "last acquisition error"),
     "Acquisition.FrameCounter": ("int", "frames captured so far"),
     "Acquisition.FrameCounter.Reset": ("int", "set 1 to reset counter"),
+    "AcquisitionStart.TriggerMode": ("string", "trigger at acquisition start"),
+    "AcquisitionEnd.TriggerMode": ("string", "trigger at acquisition end"),
+    "FrameStart.TriggerMode": ("string", "frame start trigger"),
+    "FrameBurstStart.TriggerMode": ("string", "burst start trigger"),
+    "FrameBurstEnd.TriggerMode": ("string", "burst end trigger"),
+    # --- processing ---------------------------------------------------------
+    "Average.Value": ("int", "average (boxcar) length"),
+    "AberCorrection.Enable": ("int", "aberration correction enable"),
+    "AberCorrection.LoadFromFlash": ("int", "load aber correction from flash"),
+    "BadPixelCorrection.Enable": ("int", "bad pixel correction enable"),
+    "BadPixelCorrection.Calculate": ("int", "calculate bad pixel map"),
+    "BadPixelCorrection.SaveToFlash": ("int", "save bad pixel map"),
+    "BadPixelCorrection.HighThreshold": ("int", "bad pixel high threshold"),
+    "BadPixelCorrection.LowThreshold": ("int", "bad pixel low threshold"),
+    "RowBlanking.Enable": ("int", "row blanking enable"),
+    "RowId.Enable": ("int", "row ID enable"),
+    "MROI.Enable": ("int", "MROI enable (legacy)"),
+    "MROI.Htot": ("int", "MROI H total (legacy)"),
+    "MROI.Index": ("int", "MROI index (legacy)"),
+    "Camera.LoadAberrationCorrection": ("int", "load aberration correction"),
+    "Camera.LoadAberrationCorrectionProgress": ("int", "aberration load progress"),
+    # --- system / storage ----------------------------------------------------
     "System.DeviceName": ("string", "device name"),
     "System.FirmwareVersion": ("string", "firmware version"),
     "System.SerialNumber": ("string", "system serial"),
     "System.CopyrightInfo": ("string", "copyright info"),
     "System.DateAndTime": ("string", "camera date/time"),
+    "System.TimeAutomatic": ("int", "automatic time sync"),
     "System.NumScans": ("int", "number of scans"),
     "System.Fileserver.Start": ("int", "start FTP file server"),
     "System.Fileserver.Stop": ("int", "stop FTP file server"),
+    "System.FreeSpace": ("string", "free space on card"),
+    "System.FreeSpaceInCaptures": ("string", "free space in capture area"),
+    "System.FormatCard": ("int", "format SD card (set 1)"),
+    "System.FactoryReset": ("int", "factory reset (set 1)"),
+    "System.CheckCalibration": ("int", "check calibration"),
+    "System.CalibrationCheckInUse": ("int", "calibration check in use"),
+    "System.ResetCalibrationData": ("int", "reset calibration data"),
+    "System.ProfileName": ("string", "active profile name"),
+    "System.PowerSavingOn": ("int", "power saving on"),
+    "System.SelfDiagnostic": ("string", "self diagnostic"),
+    "System.GpsActive": ("int", "GPS active"),
+    "System.BatteryCapacity": ("int", "battery capacity"),
+    # --- UI / display / network (IQ specific) --------------------------------
+    "System.DisplayOn": ("int", "device display on"),
+    "System.DisplayTimeout": ("int", "display timeout"),
+    "System.UiPause.Start": ("int", "pause UI (set 1)"),
+    "System.UiPause.Continue": ("int", "continue UI"),
+    "System.UiPause.Stop": ("int", "stop UI pause"),
+    "System.SystemSoundsOn": ("int", "system sounds"),
+    "System.WlanOn": ("int", "WiFi on"),
+    "System.WlanDhcpClient": ("int", "WiFi DHCP client"),
+    "System.WlanDhcpServer": ("int", "WiFi DHCP server"),
+    "System.WlanStaticIp": ("string", "WiFi static IP"),
+    "System.Remote.Enabled": ("int", "remote access enabled"),
+    "System.Remote.Password": ("string", "remote password"),
+    "System.RemoteModeOn": ("int", "remote mode on"),
+    "System.TimeLapseOn": ("int", "time lapse on"),
+    "System.TimeLapseInterval": ("int", "time lapse interval"),
+    "System.TimeLapseOccurrence": ("int", "time lapse occurrences"),
+    # --- ASCII connection (legacy PX protocol) -------------------------------
+    "AsciiConnection.Start": ("int", "start ASCII connection"),
+    "AsciiConnection.Stop": ("int", "stop ASCII connection"),
+    "AsciiConnection.SwitchToAcquisition": ("int", "switch ASCII to acquisition"),
+    "Camera.AsciiConnection.Start": ("int", "start ASCII connection (camera scope)"),
+    "Camera.AsciiConnection.Stop": ("int", "stop ASCII connection (camera scope)"),
 }
 
 
@@ -349,11 +425,25 @@ class SpecimCameraAPI:
         """Enable the SDK's internal qDebug() logging (to the console)."""
         self.dll.EYE_SetLogging(bool(enabled))
 
-    def connect(self, max_devices: int = MAX_DEVICES) -> list[int]:
-        """Initialize the SDK and open all connected cameras.
+    def connect(
+        self,
+        max_devices: int = MAX_DEVICES,
+        timeout: float = 20.0,
+        poll: float = 0.5,
+    ) -> list[int]:
+        """Initialize the SDK, run discovery and open all connected cameras.
 
-        Returns the list of device handles (int, 1-based). Raises EyeError if
-        no camera is found.
+        SpecimIQ specifics (verified from the IQ eyeapi.dll):
+        * discovery is an *asynchronous* global UDP listener (port 54546,
+          multicast ff08::1). It is started by the first
+          EYE_OpenConnectedDevices(..., True) call.
+        * subsequent calls return 1 immediately and store the number of
+          opened devices in the out-parameter.
+        So we start discovery, then poll until the device count is > 0 or
+        `timeout` seconds elapse.
+
+        Returns the list of device handles. Raises EyeError if no camera
+        is found within the timeout.
         """
         d = self.dll
         rc = d.EYE_Load()
@@ -361,10 +451,25 @@ class SpecimCameraAPI:
             raise EyeError(f"EYE_Load failed ({rc})")
 
         buf = (ct.c_uint32 * max_devices)()
-        n = d.EYE_OpenConnectedDevices(buf, False)
-        # The DLL stores the number of connected devices in *handles (verified
-        # from openConnectedDevices@QEyeSystem, which returns the device count).
-        count = n if n > 0 else 0
+        deadline = time.time() + timeout
+        count = 0
+        # First call starts the async discovery listener.
+        d.EYE_OpenConnectedDevices(buf, True)
+        while time.time() < deadline:
+            # Re-calling returns 1 (singleton exists) and refreshes *buf with
+            # the number of opened (discovered + connected) devices.
+            n = d.EYE_OpenConnectedDevices(buf, True)
+            count = int(buf[0]) if n > 0 else 0
+            if count > 0:
+                break
+            time.sleep(poll)
+
+        if count == 0:
+            raise EyeError(
+                f"no camera found after {timeout:.0f}s of discovery "
+                "(is the camera powered on and connected via USB/WiFi?)"
+            )
+
         self.handles = []
         for i in range(1, count + 1):
             h = ct.c_uint64()
@@ -647,25 +752,81 @@ class SpecimCameraAPI:
 # ---------------------------------------------------------------------------
 # Raw JSON-RPC fallback (no DLL)
 # ---------------------------------------------------------------------------
+def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
+    """
+    Pure-Python SpecimIQ discovery (no DLL needed).
+
+    The IQ SDK listens on UDP 54546 (multicast group ff08::1) and receives
+    JSON datagrams from cameras, e.g.:
+
+        {"type":"iq","services":["rpc",...],"addresses":["ADDR:192.168.7.2",
+         "MAC:..","IPV6ADDR:fe80::.."], ...}
+
+    Returns a list of parsed datagrams (dicts) received within `timeout`.
+    Use the first 'addresses' entry (ADDR:...) as the camera's IPv4 address
+    for the JSON-RPC connection on TCP port 5001 + (device_index - 1).
+    """
+    import json
+    import socket
+    results: list[dict] = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return results
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("", port))
+    except OSError:
+        s.close()
+        return results
+    # Join the IPv4-compatible representation of ff08::1 (all-nodes).
+    try:
+        mreq = socket.inet_aton("239.255.255.251") + socket.inet_aton("0.0.0.0")
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    except OSError:
+        pass  # still receives unicast/other-group traffic on the bind port
+    s.settimeout(timeout)
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            data, addr = s.recvfrom(65536)
+        except socket.timeout:
+            break
+        except OSError:
+            break
+        try:
+            msg = json.loads(data.decode("utf-8", "replace"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(msg, dict):
+            msg["_from"] = addr[0]
+            results.append(msg)
+    s.close()
+    return results
+
+
 class EyeJsonRpc:
     """
     Minimal raw JSON-RPC 2.0 client for the camera's Eye service, for cases
     where loading eyeapi.dll is not an option.
 
-    The camera (device 1 = first camera) listens on TCP 127.0.0.1:5001
-    (port = 5000 + device_index, 1-based). Messages are plain JSON objects,
-    e.g.:
+    The camera (device N) listens on TCP <camera-ip>:5000+N (1-based),
+    i.e. the first camera is on port 5001. The camera IP comes from UDP
+    discovery (see discover_cameras()): 192.168.7.2 for a USB-attached
+    camera (usb0 virtual interface), or the WiFi/LAN address otherwise.
+    Messages are plain JSON objects, e.g.:
 
         request:  {"jsonrpc":"2.0","id":1,"method":"eye1.getFloat",
                    "params":["Camera.ExposureTime"]}
         response: {"jsonrpc":"2.0","id":1,"result":4.0}
 
     NOTE: this is a best-effort re-implementation of the wire protocol
-    (verified from eyeapi.dll: QJsonRpcSocket, port constants, method name
-    format). The ctypes API above is the supported path.
+    (verified from the IQ eyeapi.dll: QJsonRpcSocket, port arithmetic
+    5000+index, method name format eye%1.*). The ctypes API above is the
+    supported path.
     """
 
-    def __init__(self, host: str = "127.0.0.1", device: int = 1, timeout: float = 10.0):
+    def __init__(self, host: str = "192.168.7.2", device: int = 1, timeout: float = 10.0):
         import socket
         self.host = host
         self.device = device          # 1-based
