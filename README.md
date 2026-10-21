@@ -153,7 +153,8 @@ for i, angle in enumerate(range(0, 360, 5)):
 ## Testing
 
 ```
-python test_api.py          # read-only checks (model, firmware, settings, FTP port)
+python test_api.py             # read-only checks (model, firmware, settings, FTP port)
+python test_api.py --debug     # include eyeapi2.dll diagnostic logging
 python test_api.py --acquire   # additionally triggers a 1000-line capture
 ```
 

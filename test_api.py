@@ -2,7 +2,7 @@
 """
 Test script for the Specim Eye API (specim_eye_api.py).
 
-Run with:  python test_api.py [--acquire]
+Run with:  python test_api.py [--debug] [--acquire]
 
 Without --acquire it only reads non-invasive features (model, firmware,
 exposure, ...). With --acquire it configures a short capture (1000 lines),
@@ -28,6 +28,7 @@ class TestRunner:
 
     def run_test(self, name, test_func):
         print(f"\n  [{name}] ...", end=" ", flush=True)
+        result = False
         try:
             result = test_func()
             if result:
@@ -68,7 +69,7 @@ def main():
 
     print("\n1. Connecting (EYE_Load + EYE_OpenConnectedDevices)")
     cam = SpecimCameraAPI()
-    cam.set_logging(False)
+    cam.set_logging("--debug" in sys.argv)
 
     def connect():
         cam.connect()
