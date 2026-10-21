@@ -61,8 +61,8 @@ The full annotated list is in `specim_eye_api.py` (`KNOWN_FEATURES`).
 
 | File | Purpose |
 |---|---|
-| `specim_eye_api.py` | **Use this.** ctypes wrapper around `eyeapi.dll` (+ optional raw JSON-RPC fallback client) |
-| `test_api.py` | Test suite: `python test_api.py` (add `--acquire` to actually trigger a capture) |
+| `specim_eye_api.py` | **Use this.** ctypes wrapper around `eyeapi2.dll` (+ optional raw JSON-RPC client) |
+| `test_api.py` | Test suite: `python test_api.py` (add `--no-dll` to use JSON-RPC or `--acquire` to trigger a capture) |
 
 ## Requirements
 
@@ -153,10 +153,16 @@ for i, angle in enumerate(range(0, 360, 5)):
 ## Testing
 
 ```
-python test_api.py             # read-only checks (model, firmware, settings, FTP port)
-python test_api.py --debug     # include eyeapi2.dll diagnostic logging
-python test_api.py --acquire   # additionally triggers a 1000-line capture
+python test_api.py                          # read-only DLL-backed checks
+python test_api.py --no-dll                 # test JSON-RPC at 127.0.0.1:5001
+python test_api.py --no-dll --host 192.168.7.2  # connect to a specified host
+python test_api.py --debug                  # include eyeapi2.dll diagnostic logging
+python test_api.py --no-dll --acquire       # trigger capture through JSON-RPC
+python test_api.py --acquire                # trigger capture through the DLL
 ```
+
+`--host` is only valid with `--no-dll`; DLL discovery does not accept a host
+address. The raw JSON-RPC path skips the DLL-only FTP-port check.
 
 ## Troubleshooting
 
