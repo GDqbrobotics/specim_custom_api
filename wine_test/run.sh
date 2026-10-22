@@ -26,16 +26,16 @@ if [ ! -x test.exe ] || [ test.c -nt test.exe ]; then
     for c in x86_64-w64-mingw32-gcc-posix x86_64-w64-mingw32-gcc; do
         command -v "$c" >/dev/null && CC="$c" && break
     done
-    if [ -z "$CC" ] && [ -x /tmp/mingw_pkgs/root/usr/bin/x86_64-w64-mingw32-gcc-posix ]; then
-        CC=/tmp/mingw_pkgs/root/usr/bin/x86_64-w64-mingw32-gcc-posix
+    if [ -z "$CC" ] && [ -x ./toolchain/root/usr/bin/x86_64-w64-mingw32-gcc-posix ]; then
+        CC=./toolchain/root/usr/bin/x86_64-w64-mingw32-gcc-posix
     fi
     if [ -z "$CC" ]; then
         echo "no x86_64-w64-mingw32-gcc found (apt install mingw-w64)"; exit 1
     fi
     INC=/usr/x86_64-w64-mingw32/include
     LIB=/usr/x86_64-w64-mingw32/lib
-    [ -d "$INC" ] || INC=/tmp/mingw_pkgs/root/usr/x86_64-w64-mingw32/include
-    [ -d "$LIB" ] || LIB=/tmp/mingw_pkgs/root/usr/x86_64-w64-mingw32/lib
+    [ -d "$INC" ] || INC=./toolchain/root/usr/x86_64-w64-mingw32/include
+    [ -d "$LIB" ] || LIB=./toolchain/root/usr/x86_64-w64-mingw32/lib
     "$CC" -I"$INC" -L"$LIB" test.c -o test.exe -lkernel32
 fi
 

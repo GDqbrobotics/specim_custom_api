@@ -289,7 +289,9 @@ class SpecimCameraAPI:
             if not set_dll_directory(self.dll_dir):
                 raise ct.WinError()
 
+        self._qapp = None
         self.dll = ct.WinDLL(dll_path)
+        self._install_qapp()   # must happen before the first EYE_* call
         self._bind_exports()
         self._setup_prototypes()
 
@@ -297,6 +299,48 @@ class SpecimCameraAPI:
         self._cb_refs: list = []          # keep ctypes callbacks alive
         self._user_refs: list = []        # keep user objects alive
         self._connected = False
+
+    def _install_qapp(self) -> None:
+        """Create a QCoreApplication on the calling thread (main thread).
+
+        Why: the SDK's RPC path (TCP connect, testAlive, response handling)
+        runs on the *calling* thread and uses QEventLoop/QTimer. Without a
+        QCoreApplication on that thread, QEventLoop::exec() returns
+        immediately and timers never fire, so the first RPC hangs forever
+        (you see "QEventLoop: Cannot be used without QApplication" and
+        "QObject::startTimer: Timers can only be used with threads started
+        with QThread" with --debug).
+
+        The SDK has a worker std::thread that creates its own QCoreApplication
+        only when QCoreApplication::self is null; creating ours first makes
+        that worker skip its own instance (Qt allows one QCoreApplication per
+        process) and lets all Qt objects live on the main thread, exactly like
+        inside SpecimIQ Studio (a Qt app). Must be called on the same thread
+        that will call the EYE_* functions.
+        """
+        qtcore_path = os.path.join(self.dll_dir, "Qt5Core.dll")
+        if not os.path.exists(qtcore_path):
+            return  # rely on the SDK's own worker-thread fallback
+        try:
+            qtcore = ct.CDLL(qtcore_path)
+            # If a QCoreApplication already exists (previous instance or a
+            # host Qt app), do NOT create a second one (Qt allows one per
+            # process). The exported static QCoreApplication::self holds it.
+            try:
+                self_slot = ct.c_void_p.in_dll(
+                    qtcore, "?self@QCoreApplication@@0PEAV1@EA")
+                if ct.c_void_p.from_address(self_slot.value).value:
+                    return
+            except (ValueError, OSError):
+                pass
+            ctor = qtcore["??0QCoreApplication@@QEAA@AEAHPEAPEADH@Z"]
+            argc = ct.c_int(1)
+            argv = (ct.c_char_p * 2)(b"specim-custom-api", None)
+            app_ptr = ctor(ct.byref(argc), ct.byref(argv), 0)
+            # keep references alive for the lifetime of this object:
+            self._qapp = (qtcore, app_ptr, argc, argv)
+        except (OSError, KeyError, ValueError):
+            self._qapp = None
 
     def _bind_exports(self) -> None:
         """Give the SDK's decorated C++ exports the names used by this wrapper."""
@@ -769,39 +813,64 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
     import json
     import socket
     results: list[dict] = []
+    socks = []
+
+    # IPv4 socket (covers IPv4 announcements / Windows dual-stack delivery)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s4.bind(("", port))
+        try:
+            mreq = socket.inet_aton("239.255.255.251") + socket.inet_aton("0.0.0.0")
+            s4.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError:
+            pass
+        socks.append(s4)
     except OSError:
+        pass
+
+    # IPv6 socket: cameras announce on the link-local all-nodes group
+    # ff08::1 (verified in eyeapi.dll's DiscoveryListener), which an IPv4
+    # socket does not reliably receive on Windows.
+    try:
+        s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s6.bind(("::", port, 0, 0))
+        try:
+            group = socket.inet_pton(socket.AF_INET6, "ff08::1")
+            # join on all interfaces (scope id 0 = default on most OSes)
+            mreq6 = group + socket.pack("=I", 0)
+            s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq6)
+        except (OSError, AttributeError):
+            pass
+        socks.append(s6)
+    except OSError:
+        pass
+
+    if not socks:
         return results
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.bind(("", port))
-    except OSError:
-        s.close()
-        return results
-    # Join the IPv4-compatible representation of ff08::1 (all-nodes).
-    try:
-        mreq = socket.inet_aton("239.255.255.251") + socket.inet_aton("0.0.0.0")
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-    except OSError:
-        pass  # still receives unicast/other-group traffic on the bind port
-    s.settimeout(timeout)
+    for s in socks:
+        s.settimeout(0.2)
     end = time.time() + timeout
     while time.time() < end:
-        try:
-            data, addr = s.recvfrom(65536)
-        except socket.timeout:
-            break
-        except OSError:
-            break
-        try:
-            msg = json.loads(data.decode("utf-8", "replace"))
-        except (ValueError, UnicodeDecodeError):
-            continue
-        if isinstance(msg, dict):
-            msg["_from"] = addr[0]
-            results.append(msg)
-    s.close()
+        for s in socks:
+            try:
+                data, addr = s.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                s.close()
+                socks.remove(s)
+                break
+            try:
+                msg = json.loads(data.decode("utf-8", "replace"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(msg, dict):
+                msg["_from"] = addr[0]
+                results.append(msg)
+    for s in socks:
+        s.close()
     return results
 
 

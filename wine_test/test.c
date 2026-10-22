@@ -10,6 +10,7 @@ typedef int (__cdecl *F_ocs)(unsigned*, int);
 typedef int (__cdecl *F_chg)(void);
 typedef int (__cdecl *F_list)(unsigned*, int);
 typedef int (__cdecl *F_name)(wchar_t*, unsigned, unsigned);
+typedef void* (__cdecl *F_qapp)(int*, char**, int);
 
 static void* get(HMODULE h, const char* n) { return GetProcAddress(h, n); }
 
@@ -17,6 +18,25 @@ int main(void) {
     HMODULE h = LoadLibraryW(L"eyeapi2.dll");
     if (!h) { printf("FAIL LoadLibrary: %lu\n", GetLastError()); return 2; }
     printf("OK  loaded eyeapi2.dll\n");
+
+    /* Same as the Python wrapper's _install_qapp(): create a QCoreApplication
+     * on the calling thread BEFORE the first EYE_* call, so the SDK's worker
+     * thread sees QCoreApplication::self != 0 and all Qt objects (UDP
+     * discovery, TCP RPC, timers, QEventLoop waits) live on this thread. */
+    HMODULE qt = LoadLibraryW(L"Qt5Core.dll");
+    if (qt) {
+        F_qapp qapp_ctor = (F_qapp)get(qt, "??0QCoreApplication@@QEAA@AEAHPEAPEADH@Z");
+        if (qapp_ctor) {
+            int argc = 1;
+            char* argv[] = { (char*)"wine-test", 0 };
+            void* app = qapp_ctor(&argc, argv, 0);
+            printf("OK  QCoreApplication created on main thread: %p\n", app);
+        } else {
+            printf("WARN QCoreApplication ctor not found\n");
+        }
+    } else {
+        printf("WARN Qt5Core.dll not loadable: %lu\n", GetLastError());
+    }
 
     F_int Load   = (F_int)get(h, "?EYE_Load@@YAHXZ");
     F_int Unload = (F_int)get(h, "?EYE_Unload@@YAHXZ");
