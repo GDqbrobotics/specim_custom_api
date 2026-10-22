@@ -341,8 +341,7 @@ class SpecimCameraAPI:
                 return
             ctor = qtcore["??0QCoreApplication@@QEAA@AEAHPEAPEADH@Z"]
             ctor.restype = ct.c_void_p
-            ctor.argtypes = [ct.POINTER(ct.c_int),
-                             ct.POINTER(ct.c_char_p), ct.c_uint]
+            ctor.argtypes = [ct.POINTER(ct.c_int), ct.c_void_p, ct.c_uint]
             argc = ct.c_int(1)
             argv = (ct.c_char_p * 2)(b"specim-custom-api", None)
             app_ptr = ctor(ct.byref(argc), ct.byref(argv), 0)
@@ -831,7 +830,7 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
     results: list[dict] = []
     socks = []
 
-    # IPv4 socket (covers IPv4 announcements / Windows dual-stack delivery)
+    # IPv4 socket (covers IPv4 announcements)
     try:
         s4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -845,21 +844,26 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
     except OSError:
         pass
 
-    # IPv6 socket: cameras announce on the link-local all-nodes group
-    # ff08::1 (verified in eyeapi.dll's DiscoveryListener), which an IPv4
-    # socket does not reliably receive on Windows.
+    # IPv6 sockets: cameras announce on the link-local all-nodes group
+    # ff08::1 (verified in eyeapi.dll's DiscoveryListener). The SDK joins
+    # that group on *every* network interface (Qt iterates
+    # QNetworkInterface::allInterfaces()); joining with scope id 0 only
+    # covers one "default" interface, which on Windows is NOT the USB
+    # virtual adapter the camera sits on. So open one socket per
+    # interface index and join there.
     try:
-        s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        s6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s6.bind(("::", port, 0, 0))
-        try:
-            group = socket.inet_pton(socket.AF_INET6, "ff08::1")
-            # join on all interfaces (scope id 0 = default on most OSes)
-            mreq6 = group + socket.pack("=I", 0)
-            s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq6)
-        except (OSError, AttributeError):
-            pass
-        socks.append(s6)
+        for ifidx, _ifname in socket.if_nameindex():
+            try:
+                s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                s6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s6.bind(("::", port, 0, 0))
+                group = socket.inet_pton(socket.AF_INET6, "ff08::1")
+                mreq6 = group + socket.pack("=I", ifidx)
+                s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP,
+                              mreq6)
+                socks.append(s6)
+            except (OSError, AttributeError, ValueError):
+                pass
     except OSError:
         pass
 
@@ -911,47 +915,59 @@ def probe_camera(host: str, listen_secs: float = 8.0, port: int = 54546,
           f"for {listen_secs:.0f}s (you should hear from the camera even if "
           f"TCP is closed)...")
     heard = discover_cameras(timeout=listen_secs, port=port)
+    announced = set()
     if heard:
         for msg in heard:
             print(f"[probe]   announcement from {msg.get('_from')}: {msg}")
+            for a in msg.get("addresses", []):
+                if a.startswith("ADDR:"):
+                    announced.add(a[5:])
     else:
         print("[probe]   no announcements heard — camera not on this LAN, "
               "USB link down, or Windows firewall blocking UDP 54546")
 
-    print(f"[probe] 2/3 TCP-probing {host} ports {list(ports)}...")
-    open_ports = []
-    for p in ports:
-        try:
-            s = socket.create_connection((host, p), timeout=1.0)
-            open_ports.append(p)
-            print(f"[probe]   port {p}: OPEN")
-            if p == 5001:
-                try:
-                    s.sendall(json.dumps({"jsonrpc": "2.0", "id": 1,
-                                          "method": "eye1.testAlive"}
-                                         .encode()) + b"\n")
-                    s.settimeout(3.0)
-                    buf = b""
-                    while b"\n" not in buf:
-                        chunk = s.recv(4096)
-                        if not chunk:
-                            break
-                        buf += chunk
-                    print(f"[probe]   testAlive reply: {buf.decode('utf-8', 'replace')!r}")
-                except OSError as e:
-                    print(f"[probe]   testAlive exchange failed: {e}")
-            s.close()
-        except OSError:
-            print(f"[probe]   port {p}: closed/unreachable")
+    # The APIPA/USB address can change between boots (169.254.x.x is
+    # re-randomized). If the camera announced a different IP than the one
+    # we were given, probe that one too.
+    targets = [host] + sorted(a for a in announced if a != host)
 
-    if open_ports:
-        print(f"[probe] open ports: {open_ports}")
-    else:
-        print("[probe] no ports open. If the camera IS announcing on UDP, "
-              "its RPC service may be off (camera state, or it only opens "
-              "5001 while a client session is active). Try: power-cycle the "
-              "camera, ensure SpecimIQ Studio is closed, re-plug USB, wait "
-              "~10s, then run this again.")
+    for t in targets:
+        print(f"[probe] 2/3 TCP-probing {t} ports {list(ports)}...")
+        open_ports = []
+        for p in ports:
+            try:
+                s = socket.create_connection((t, p), timeout=1.0)
+                open_ports.append(p)
+                print(f"[probe]   port {p}: OPEN")
+                if p == 5001:
+                    try:
+                        s.sendall(json.dumps({"jsonrpc": "2.0", "id": 1,
+                                              "method": "eye1.testAlive"}
+                                             .encode()) + b"\n")
+                        s.settimeout(3.0)
+                        buf = b""
+                        while b"\n" not in buf:
+                            chunk = s.recv(4096)
+                            if not chunk:
+                                break
+                            buf += chunk
+                        print(f"[probe]   testAlive reply: {buf.decode('utf-8', 'replace')!r}")
+                    except OSError as e:
+                        print(f"[probe]   testAlive exchange failed: {e}")
+                s.close()
+            except OSError:
+                print(f"[probe]   port {p}: closed/unreachable")
+        if open_ports:
+            print(f"[probe] open ports on {t}: {open_ports}")
+        else:
+            print(f"[probe] no ports open on {t}.")
+
+    if len(targets) == 1 and not announced:
+        print("[probe] If the camera IS announcing on UDP but you heard "
+              "nothing, the Windows firewall may block it — allow python "
+              "through it, or check that the USB adapter (ipconfig: an "
+              "'Ethernet N' with a 169.254.x.x address) shows 'Media "
+              "connected' and the camera is powered on.")
 
 
 class EyeJsonRpc:
