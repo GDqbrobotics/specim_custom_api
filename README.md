@@ -172,11 +172,33 @@ Or run the ready-made pipeline: `python acquire.py --count 10 --out captures/`.
 ```
 python test_api.py                          # read-only DLL-backed checks
 python test_api.py --no-dll                 # test raw JSON-RPC
-python test_api.py --no-dll --host 192.168.7.2  # connect to a specified host
+python test_api.py --no-dll --host 169.254.222.101  # connect to a given IP
 python test_api.py --debug                  # include eyeapi diagnostic logging
 python test_api.py --acquire                # trigger a capture through the DLL
 python test_api.py --no-dll --acquire       # trigger capture through JSON-RPC
+python test_api.py --probe 169.254.222.101 # diagnostics (see below)
 ```
+
+### `--probe` (use when you get "connection refused")
+
+`--probe HOST` does three things and prints the result of each:
+1. **Listens on UDP 54546** (multicast `ff08::1`, exactly like the SDK) for a
+   few seconds. If the camera is alive on the network you'll see its JSON
+   announcement and its *current* IP — even when TCP is refused.
+2. **TCP-probes ports 5000–5020** on `HOST` and tells you which are open.
+   The RPC port is `5001` for the first camera.
+3. **If 5001 is open**, sends `eye1.testAlive` and prints the reply.
+
+This separates "camera not reachable at all" from "reachable but RPC port
+5001 is closed".
+
+### USB camera address (Windows)
+
+Over USB the camera's virtual Ethernet usually gets an APIPA address like
+`169.254.222.101` (not `192.168.7.x` — that's the Linux `usb0` case). You do
+**not** need to declare the address: `SpecimCameraAPI().connect()` discovers it
+automatically via UDP. To drive the raw `--no-dll` path, find the address with
+`--probe` (or `ipconfig`) and pass it as `--host`.
 
 On Linux without a camera, the DLL can still be smoke-tested under Wine:
 
@@ -203,6 +225,21 @@ cd wine_test && ./run.sh
 - **`GetFtpPort` returns 0** — call `connect()` first (the SDK singleton must
   exist); it then returns 5010.
 - Want to see what the SDK sends: `cam.set_logging(True)`.
+- **`QEventLoop: Cannot be used without QApplication` / `startTimer: ...`
+  then hang** (with `--debug`) — the SDK's RPC path runs on the *calling*
+  thread and needs a `QCoreApplication` there. `SpecimCameraAPI.__init__`
+  now creates one automatically (see `_install_qapp`). You should see
+  `[specim] QCoreApplication created on main thread (0x...)` before
+  connecting. If you instead see `[specim] QApp setup skipped (...)`, the
+  bundled `Qt5Core.dll` was missing/unloadable — copy it next to the other
+  DLLs.
+- **`[WinError 10061] ... expressément refusée` (connection refused)** — the
+  camera host is reachable but its RPC port is closed *right now*. Run
+  `python test_api.py --probe <ip>` to see (a) whether the camera is still
+  announcing on UDP and (b) which ports are open. If it announces but 5001 is
+  closed, the camera's RPC service is off for this state — power-cycle the
+  camera, make sure SpecimIQ Studio is closed, re-plug USB, wait ~10 s, and
+  re-run. (The DLL path retries discovery and is generally more tolerant.)
 
 ## License
 

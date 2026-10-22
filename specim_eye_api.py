@@ -319,27 +319,43 @@ class SpecimCameraAPI:
         that will call the EYE_* functions.
         """
         qtcore_path = os.path.join(self.dll_dir, "Qt5Core.dll")
-        if not os.path.exists(qtcore_path):
-            return  # rely on the SDK's own worker-thread fallback
+        if not os.path.exists(qtcore_path) or not hasattr(ct, "windll"):
+            return  # no Windows Qt5Core here; rely on the SDK's own fallback
         try:
             qtcore = ct.CDLL(qtcore_path)
+            # Locate QCoreApplication::self inside *this* loaded copy of
+            # Qt5Core (the very handle we loaded, not a same-named module).
+            k32 = ct.windll.kernel32
+            k32.GetProcAddress.restype = ct.c_void_p
+            k32.GetProcAddress.argtypes = [ct.c_void_p, ct.c_char_p]
+            self_var = k32.GetProcAddress(
+                qtcore._handle, b"?self@QCoreApplication@@0PEAV1@EA")
+            if not self_var:
+                return  # not exported; rely on the SDK's worker-thread app
             # If a QCoreApplication already exists (previous instance or a
             # host Qt app), do NOT create a second one (Qt allows one per
-            # process). The exported static QCoreApplication::self holds it.
-            try:
-                self_slot = ct.c_void_p.in_dll(
-                    qtcore, "?self@QCoreApplication@@0PEAV1@EA")
-                if ct.c_void_p.from_address(self_slot.value).value:
-                    return
-            except (ValueError, OSError):
-                pass
+            # process): the exported static QCoreApplication::self holds it.
+            if ct.c_void_p.from_address(self_var).value:
+                print("[specim] QCoreApplication already exists; reusing it")
+                self._qapp = (qtcore, None, 1, None)
+                return
             ctor = qtcore["??0QCoreApplication@@QEAA@AEAHPEAPEADH@Z"]
+            ctor.restype = ct.c_void_p
+            ctor.argtypes = [ct.POINTER(ct.c_int),
+                             ct.POINTER(ct.c_char_p), ct.c_uint]
             argc = ct.c_int(1)
             argv = (ct.c_char_p * 2)(b"specim-custom-api", None)
             app_ptr = ctor(ct.byref(argc), ct.byref(argv), 0)
-            # keep references alive for the lifetime of this object:
-            self._qapp = (qtcore, app_ptr, argc, argv)
-        except (OSError, KeyError, ValueError):
+            if app_ptr:
+                # keep references alive for the lifetime of this object:
+                self._qapp = (qtcore, app_ptr, argc, argv)
+                print(f"[specim] QCoreApplication created on main thread "
+                      f"({app_ptr:#x})")
+            else:
+                print("[specim] QCoreApplication ctor returned null; "
+                      "continuing without")
+        except (OSError, AttributeError, ValueError) as e:
+            print(f"[specim] QApp setup skipped ({type(e).__name__}: {e})")
             self._qapp = None
 
     def _bind_exports(self) -> None:
@@ -872,6 +888,70 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
     for s in socks:
         s.close()
     return results
+
+
+def probe_camera(host: str, listen_secs: float = 8.0, port: int = 54546,
+                 ports=range(5000, 5021)) -> None:
+    """
+    Diagnostics for "connection refused" on TCP 5001.
+
+    1. Listens on UDP 54546 (multicast ff08::1, like the SDK) for a few
+       seconds and prints any camera announcement — proves the camera is
+       alive on the network and tells you its *current* IP.
+    2. TCP-probes 5000..5020 on `host` — tells you whether the camera is
+       listening on the RPC port at all right now.
+    3. If 5001 is open, sends eye1.testAlive and prints the answer.
+
+    Usage:  python test_api.py --probe 169.254.222.101
+    """
+    import json
+    import socket
+
+    print(f"[probe] 1/3 listening for camera announcements on UDP {port} "
+          f"for {listen_secs:.0f}s (you should hear from the camera even if "
+          f"TCP is closed)...")
+    heard = discover_cameras(timeout=listen_secs, port=port)
+    if heard:
+        for msg in heard:
+            print(f"[probe]   announcement from {msg.get('_from')}: {msg}")
+    else:
+        print("[probe]   no announcements heard — camera not on this LAN, "
+              "USB link down, or Windows firewall blocking UDP 54546")
+
+    print(f"[probe] 2/3 TCP-probing {host} ports {list(ports)}...")
+    open_ports = []
+    for p in ports:
+        try:
+            s = socket.create_connection((host, p), timeout=1.0)
+            open_ports.append(p)
+            print(f"[probe]   port {p}: OPEN")
+            if p == 5001:
+                try:
+                    s.sendall(json.dumps({"jsonrpc": "2.0", "id": 1,
+                                          "method": "eye1.testAlive"}
+                                         .encode()) + b"\n")
+                    s.settimeout(3.0)
+                    buf = b""
+                    while b"\n" not in buf:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    print(f"[probe]   testAlive reply: {buf.decode('utf-8', 'replace')!r}")
+                except OSError as e:
+                    print(f"[probe]   testAlive exchange failed: {e}")
+            s.close()
+        except OSError:
+            print(f"[probe]   port {p}: closed/unreachable")
+
+    if open_ports:
+        print(f"[probe] open ports: {open_ports}")
+    else:
+        print("[probe] no ports open. If the camera IS announcing on UDP, "
+              "its RPC service may be off (camera state, or it only opens "
+              "5001 while a client session is active). Try: power-cycle the "
+              "camera, ensure SpecimIQ Studio is closed, re-plug USB, wait "
+              "~10s, then run this again.")
 
 
 class EyeJsonRpc:

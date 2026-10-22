@@ -21,7 +21,7 @@ import argparse
 import sys
 import time
 
-from specim_eye_api import EyeError, EyeJsonRpc, SpecimCameraAPI
+from specim_eye_api import EyeError, EyeJsonRpc, SpecimCameraAPI, probe_camera
 
 
 class TestRunner:
@@ -68,8 +68,16 @@ def main():
         help="use the raw JSON-RPC client instead of loading eyeapi2.dll",
     )
     parser.add_argument(
-        "--host",
-        help="camera host for --no-dll (default: 192.168.7.2, the USB bridge address)",
+        "--host", "--hostname", dest="host",
+        help="camera host for --no-dll (default: 192.168.7.2, the USB bridge "
+             "address; for a USB camera on Windows often 169.254.x.x)",
+    )
+    parser.add_argument(
+        "--probe",
+        metavar="HOST",
+        help="diagnostic mode: listen for UDP announcements, TCP-probe "
+             "ports 5000-5020 on HOST and send testAlive if 5001 is open "
+             "(use when you get 'connection refused')",
     )
     parser.add_argument(
         "--debug",
@@ -82,6 +90,9 @@ def main():
         help="configure and trigger a 1000-line capture",
     )
     args = parser.parse_args()
+    if args.probe is not None:
+        probe_camera(args.probe)
+        return 0
     if args.host is not None and not args.no_dll:
         parser.error("--host can only be used together with --no-dll")
 
