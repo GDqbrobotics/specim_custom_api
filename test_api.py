@@ -21,7 +21,10 @@ import argparse
 import sys
 import time
 
-from specim_eye_api import EyeError, EyeJsonRpc, SpecimCameraAPI, probe_camera
+from specim_eye_api import (
+    EyeError, EyeJsonRpc, SpecimCameraAPI, probe_camera,
+    discover_cameras, camera_targets,
+)
 
 
 class TestRunner:
@@ -103,8 +106,18 @@ def main():
     runner = TestRunner()
 
     if args.no_dll:
-        host = args.host or "192.168.7.2"
-        print(f"\n1. Connecting to {host}:5001 (raw JSON-RPC; no DLL)")
+        if args.host:
+            host = args.host
+        else:
+            print("\n1. Discovering camera (raw JSON-RPC; no DLL)...")
+            hits = discover_cameras(timeout=6.0)
+            targets = camera_targets(hits)
+            if not targets:
+                print("   nothing announced; falling back to 192.168.7.2")
+                targets = [("192.168.7.2", 5001)]
+            host = targets[0][0]
+            print(f"   discovered target: {host}:5001")
+        print(f"1. Connecting to {host}:5001 (raw JSON-RPC; no DLL)")
         cam = EyeJsonRpc(host=host)
     else:
         print("\n1. Connecting (EYE_Load + EYE_OpenConnectedDevices)")
@@ -124,9 +137,19 @@ def main():
 
     if args.no_dll:
         h = None
+        sys_h = None
     else:
         print(f"\n   Connected handles: {cam.handles}")
+        # A SpecimIQ camera exposes several RPC objects (photonfocus, rgb1,
+        # rgb2, stepmotor, server). Camera/Acquisition features live on the
+        # sensor device (rgb1); System.* features live on 'photonfocus'.
+        for d in cam.devices():
+            print(f"   device {d['index']}: name={d['name']!r} handle={d['handle']}")
         h = cam.handles[0]
+        try:
+            sys_h = cam.handle_for("photonfocus")
+        except EyeError:
+            sys_h = h
 
     def get_float(feature):
         return cam.get_float(feature) if args.no_dll else cam.get_float(h, feature)
@@ -134,8 +157,10 @@ def main():
     def get_int(feature):
         return cam.get_int(feature) if args.no_dll else cam.get_int(h, feature)
 
-    def get_string(feature):
-        return cam.get_string(feature) if args.no_dll else cam.get_string(h, feature)
+    def get_string(feature, handle=None):
+        if args.no_dll:
+            return cam.get_string(feature)
+        return cam.get_string(handle if handle is not None else h, feature)
 
     def get_bool(feature):
         return cam.get_bool(feature) if args.no_dll else cam.get_bool(h, feature)
@@ -148,13 +173,13 @@ def main():
         return m is not None
 
     def device_name():
-        n = get_string("System.DeviceName")
+        n = get_string("System.DeviceName", sys_h)
         print(f"   device: {n!r}")
         return n is not None
 
     def firmware():
         try:
-            fw = get_string("System.FirmwareVersion")
+            fw = get_string("System.FirmwareVersion", sys_h)
             print(f"   firmware: {fw!r}")
             return fw is not None
         except EyeError:
@@ -211,7 +236,7 @@ def main():
         runner.run_test("EYE_GetFtpPort", ftp)
 
     if args.acquire:
-        print("\n5. Acquisition test (1000 lines)")
+        print("\n5. Acquisition test")
 
         initial_counter = None
         try:
@@ -219,11 +244,22 @@ def main():
         except EyeError:
             pass
 
+        frames_seen = {"n": 0, "bytes": 0}
+        if not args.no_dll:
+            def on_frame(data, s1, s2):
+                frames_seen["n"] += 1
+                frames_seen["bytes"] += len(data)
+            try:
+                cam.add_data_callback(on_frame, h)
+            except EyeError as e:
+                print(f"   (data callback unavailable: {e})")
+
         def do_capture():
             t0 = time.time()
             if args.no_dll:
                 cam.set_float("Camera.ExposureTime", 4.0)
-                cam.set_int("Camera.Count", 1000)
+                if cam.is_writeable("Camera.Count"):
+                    cam.set_int("Camera.Count", 1000)
                 cam.set_int("Acquisition.Start", 1)
                 try:
                     deadline = time.time() + 60
@@ -236,7 +272,14 @@ def main():
                 finally:
                     cam.set_int("Acquisition.Stop", 1)
             else:
-                cam.acquire(handle=h, exposure_us=4.0, count=1000, wait=True, timeout=60)
+                if cam.is_writeable(h, "Camera.Count"):
+                    cam.set_int(h, "Camera.Count", 1000)
+                else:
+                    print("   (Camera.Count not writeable; using camera default)")
+                cam.set_float(h, "Camera.ExposureTime", 4.0)
+                cam.start(h)
+                cam.wait_acquisition_done(h, timeout=60)
+                cam.stop(h)
             print(f"   capture done in {time.time() - t0:.1f}s")
             return True
 
@@ -257,6 +300,10 @@ def main():
             return not get_bool("Acquisition.Acquiring")
 
         runner.run_test("Back to idle", back_to_idle)
+
+        if not args.no_dll:
+            print(f"\n   real-time data callback: {frames_seen['n']} chunk(s), "
+                  f"{frames_seen['bytes']} bytes received during capture")
     else:
         print("\n5. Acquisition test: skipped (pass --acquire to trigger one)")
 

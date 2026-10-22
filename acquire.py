@@ -24,7 +24,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from specim_eye_api import SpecimCameraAPI, discover_cameras, EyeError  # noqa: E402
+from specim_eye_api import (  # noqa: E402
+    SpecimCameraAPI, discover_cameras, camera_targets, EyeError,
+)
 
 
 def discover_only(timeout: float) -> int:
@@ -70,14 +72,25 @@ def acquire(args) -> int:
     cam = SpecimCameraAPI(dll_dir=args.dll_dir)
     cam.set_logging(args.debug)
     cam.connect(timeout=args.connect_timeout)
-    h = cam.h(0)
+    # A SpecimIQ camera exposes several RPC objects: 'rgb1' (sensor),
+    # 'photonfocus' (System.*), 'stepmotor', 'server'. Use the right one.
+    try:
+        h = cam.handle_for("rgb1")
+    except EyeError:
+        h = cam.h(0)
+    try:
+        sys_h = cam.handle_for("photonfocus")
+    except EyeError:
+        sys_h = h
+    print("      devices:", [d["name"] for d in cam.devices()])
 
     # 3. identity
     print("[3/5] camera identity:")
-    for feature in ("Camera.Model", "Camera.SerialNumber", "System.DeviceName",
-                    "System.FirmwareVersion"):
+    for feature, hh in (("Camera.Model", h), ("Camera.SerialNumber", h),
+                        ("System.DeviceName", sys_h),
+                        ("System.FirmwareVersion", sys_h)):
         try:
-            print(f"      {feature} = {cam.get(h, feature)!r}")
+            print(f"      {feature} = {cam.get(hh, feature)!r}")
         except EyeError:
             print(f"      {feature} = (unavailable)")
     try:
@@ -113,9 +126,26 @@ def acquire(args) -> int:
     except EyeError as e:
         print("      (count set failed:", e, ")")
 
+    writeable = cam.is_writeable(h, "Camera.Count")
+    if writeable:
+        print(f"[4b/5] setting Camera.Count = {args.count}")
+        cam.set_int(h, "Camera.Count", args.count)
+    else:
+        print("[4b/5] Camera.Count is read-only here; will do "
+              f"{args.count} start/stop cycle(s) of 1 frame each")
+
     t0 = time.time()
-    cam.acquire(h, exposure_us=None, count=None, wait=True,
-                timeout=args.timeout)
+    if writeable:
+        cam.start(h)
+        cam.wait_acquisition_done(h, timeout=args.timeout)
+        cam.stop(h)
+    else:
+        for i in range(max(1, args.count)):
+            cam.start(h)
+            cam.wait_acquisition_done(h, timeout=args.timeout)
+            cam.stop(h)
+            print(f"      cycle {i + 1}/{max(1, args.count)} done, "
+                  f"frames so far: {len(frames)}")
     dt = time.time() - t0
     print(f"[5/5] acquisition finished in {dt:.1f}s, "
           f"frames received: {len(frames)}")
@@ -146,13 +176,11 @@ def acquire(args) -> int:
     # 6. optional FTP listing
     if args.list_datasets:
         print("FTP datasets:")
-        host = "192.168.7.2"  # USB bridge default
-        for hit in discover_cameras(timeout=2.0):
-            for a in hit.get("addresses", []):
-                if a.startswith("ADDR:"):
-                    host = a.split(":", 1)[1]
-                    break
-            break
+        host = "192.168.7.2"  # USB bridge fallback
+        targets = camera_targets(discover_cameras(timeout=3.0))
+        if targets:
+            host = targets[0][0]
+        print(f"      trying FTP host {host}")
         list_datasets(host)
 
     cam.disconnect()

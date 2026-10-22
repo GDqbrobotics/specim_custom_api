@@ -565,6 +565,36 @@ class SpecimCameraAPI:
             raise EyeError(f"EYE_GetDeviceName failed ({rc})")
         return buf.value or ""
 
+    def devices(self) -> list[dict]:
+        """List every connected RPC device: {index, handle, name}.
+
+        A SpecimIQ camera exposes several RPC objects at once — typically
+        'photonfocus' (the camera system: System.* features), 'rgb1'/'rgb2'
+        (the sensor(s): Camera.* / Acquisition.* features), 'stepmotor'
+        (wavelength tuner) and 'server' (file server). Feature reads/writes
+        must use the handle of the device that owns the feature.
+        """
+        out = []
+        for i, h in enumerate(self.handles):
+            try:
+                name = self.device_name(h)
+            except EyeError:
+                name = "?"
+            out.append({"index": i, "handle": h, "name": name})
+        return out
+
+    def handle_for(self, name: str, subdevice: int = 0) -> int:
+        """Handle of the RPC device with the given name ('rgb1', 'photonfocus', ...)."""
+        if self._connected and name in (d["name"] for d in self.devices()):
+            return next(d["handle"] for d in self.devices() if d["name"] == name)
+        h = ct.c_uint64()
+        rc = self.dll.EYE_GetHandleByNameAndSubdevice(
+            ct.byref(h), name, ct.c_uint32(subdevice))
+        if rc != 0 or not h.value:
+            raise EyeError(f"no device named {name!r} (rc={rc})")
+        self._user_refs.append(h)
+        return int(h.value)
+
     def ftp_port(self) -> int:
         port = self.dll.EYE_GetFtpPort()
         if port <= 0:
@@ -828,7 +858,8 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
     import json
     import socket
     results: list[dict] = []
-    socks = []
+    # each entry: (socket, family, interface_index_or_0)
+    socks: list[tuple] = []
 
     # IPv4 socket (covers IPv4 announcements)
     try:
@@ -840,7 +871,7 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
             s4.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except OSError:
             pass
-        socks.append(s4)
+        socks.append((s4, socket.AF_INET, 0))
     except OSError:
         pass
 
@@ -861,7 +892,7 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
                 mreq6 = group + socket.pack("=I", ifidx)
                 s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP,
                               mreq6)
-                socks.append(s6)
+                socks.append((s6, socket.AF_INET6, ifidx))
             except (OSError, AttributeError, ValueError):
                 pass
     except OSError:
@@ -869,29 +900,79 @@ def discover_cameras(timeout: float = 5.0, port: int = 54546) -> list[dict]:
 
     if not socks:
         return results
-    for s in socks:
+    for s, _fam, _ifx in socks:
         s.settimeout(0.2)
     end = time.time() + timeout
     while time.time() < end:
-        for s in socks:
+        for s, fam, ifx in list(socks):
             try:
                 data, addr = s.recvfrom(65536)
             except socket.timeout:
                 continue
             except OSError:
                 s.close()
-                socks.remove(s)
+                socks.remove((s, fam, ifx))
                 break
             try:
                 msg = json.loads(data.decode("utf-8", "replace"))
             except (ValueError, UnicodeDecodeError):
                 continue
-            if isinstance(msg, dict):
+            if not isinstance(msg, dict):
+                continue
+            if fam == socket.AF_INET6 and len(addr) >= 4:
+                # link-local datagrams carry the receiving interface index
                 msg["_from"] = addr[0]
-                results.append(msg)
-    for s in socks:
+                msg["_scope"] = addr[3] or ifx
+            else:
+                msg["_from"] = addr[0]
+                msg["_scope"] = 0
+            results.append(msg)
+    for s, _fam, _ifx in socks:
         s.close()
     return results
+
+
+def camera_targets(hits: list[dict]) -> list[tuple[str, int]]:
+    """Turn raw discovery datagrams into connectable (host, rpc_port) pairs.
+
+    Prefers the camera's IPv6 link-local address (scoped to the interface
+    the announcement arrived on — that is exactly what the IQ SDK dials,
+    e.g. fe80::ecc3:9fff:fe2d:5e00%ethernet_32778:5001), then the IPv4
+    'ADDR:' field. Deduplicated, announcement order preserved.
+    """
+    out: list[tuple[str, int]] = []
+    seen = set()
+
+    def add(host: str):
+        key = (host, 5001)
+        if host and key not in seen:
+            seen.add(key)
+            out.append(key)
+
+    # Two passes: IPv6 link-local first (reliable over USB on Windows —
+    # that is what the SDK dials), then IPv4 'ADDR:' (works for a Linux
+    # usb0 bridge that got 192.168.7.x).
+    for prefix in ("IPV6ADDR", "ADDR:"):
+        for hit in hits:
+            for a in hit.get("addresses", []):
+                if not a.startswith(prefix):
+                    continue
+                if prefix == "IPV6ADDR":
+                    parts = a.split(None, 1)
+                    ip = (parts[1] if len(parts) > 1 else "").strip()
+                    scope = hit.get("_scope", 0)
+                    if scope:
+                        import socket
+                        try:
+                            name = socket.if_indextoname(scope)
+                        except OSError:
+                            name = str(scope)
+                        add(f"{ip}%{name}")
+                    else:
+                        add(ip)
+                else:
+                    add(a.split(":", 1)[1])
+    return out
 
 
 def probe_camera(host: str, listen_secs: float = 8.0, port: int = 54546,
@@ -915,21 +996,20 @@ def probe_camera(host: str, listen_secs: float = 8.0, port: int = 54546,
           f"for {listen_secs:.0f}s (you should hear from the camera even if "
           f"TCP is closed)...")
     heard = discover_cameras(timeout=listen_secs, port=port)
-    announced = set()
+    announced = []
     if heard:
         for msg in heard:
             print(f"[probe]   announcement from {msg.get('_from')}: {msg}")
-            for a in msg.get("addresses", []):
-                if a.startswith("ADDR:"):
-                    announced.add(a[5:])
+        announced = [h for h, _ in camera_targets(heard)]
     else:
         print("[probe]   no announcements heard — camera not on this LAN, "
               "USB link down, or Windows firewall blocking UDP 54546")
 
-    # The APIPA/USB address can change between boots (169.254.x.x is
-    # re-randomized). If the camera announced a different IP than the one
-    # we were given, probe that one too.
-    targets = [host] + sorted(a for a in announced if a != host)
+    # The USB/APIPA address changes between boots (169.254.x.x re-randomizes),
+    # and the camera is usually best reached via its IPv6 link-local scoped to
+    # the USB adapter (exactly what the SDK dials). Probe the announced
+    # targets (IPv6 first) plus the user-supplied host.
+    targets = [host] + [t for t in announced if t != host]
 
     for t in targets:
         print(f"[probe] 2/3 TCP-probing {t} ports {list(ports)}...")
@@ -975,34 +1055,46 @@ class EyeJsonRpc:
     Minimal raw JSON-RPC 2.0 client for the camera's Eye service, for cases
     where loading eyeapi.dll is not an option.
 
-    The camera (device N) listens on TCP <camera-ip>:5000+N (1-based),
-    i.e. the first camera is on port 5001. The camera IP comes from UDP
-    discovery (see discover_cameras()): 192.168.7.2 for a USB-attached
-    camera (usb0 virtual interface), or the WiFi/LAN address otherwise.
-    Messages are plain JSON objects, e.g.:
+    The camera listens on TCP <camera-ip>:5001. Unlike Insight (device N on
+    port 5000+N), a SpecimIQ camera exposes several RPC *objects* on the same
+    port, each addressed by NAME: 'rgb1'/'rgb2' (sensor), 'photonfocus'
+    (system), 'stepmotor', 'server'. Methods are eye<name>.<verb>, e.g.
 
-        request:  {"jsonrpc":"2.0","id":1,"method":"eye1.getFloat",
+        request:  {"jsonrpc":"2.0","id":1,"method":"eyergb1.getFloat",
                    "params":["Camera.ExposureTime"]}
         response: {"jsonrpc":"2.0","id":1,"result":4.0}
 
-    NOTE: this is a best-effort re-implementation of the wire protocol
-    (verified from the IQ eyeapi.dll: QJsonRpcSocket, port arithmetic
-    5000+index, method name format eye%1.*). The ctypes API above is the
-    supported path.
+    The camera IP is usually an IPv6 link-local scoped to the USB adapter,
+    e.g. fe80::ecc3:9fff:fe2d:5e00%<iface> — pass it as `host` with the scope.
+    (The DLL-backed SpecimCameraAPI is the supported path and does all of
+    this automatically; this client is for when you can't load the DLL.)
     """
 
-    def __init__(self, host: str = "192.168.7.2", device: int = 1, timeout: float = 10.0):
+    def __init__(self, host: str = "fe80::1%usb",
+                 device: str = "rgb1", port: int = 5001,
+                 timeout: float = 10.0):
         import socket
         self.host = host
-        self.device = device          # 1-based
-        self.port = 5000 + device
+        self.device = device          # RPC object name, e.g. 'rgb1'
+        self.port = port
         self.timeout = timeout
         self._id = 0
         self._sock: socket.socket | None = None
 
     def connect(self) -> None:
         import socket
-        self._sock = socket.create_connection((self.host, self.port), self.timeout)
+        # getaddrinfo resolves scoped IPv6 link-local (fe80::x%iface) into a
+        # usable (family, sockaddr) pair; plain IPv4 works too.
+        infos = socket.getaddrinfo(self.host, self.port,
+                                   socket.AF_UNSPEC, socket.SOCK_STREAM,
+                                   0, socket.AI_NUMERICHOST)
+        if not infos:
+            raise ConnectionError(f"no address for {self.host!r}")
+        family, socktype, proto, _canon, sockaddr = infos[0]
+        s = socket.socket(family, socktype, proto)
+        s.settimeout(self.timeout)
+        s.connect(sockaddr)
+        self._sock = s
 
     def close(self) -> None:
         if self._sock:
@@ -1057,30 +1149,45 @@ class EyeJsonRpc:
             raise EyeError(f"RPC {method}: {resp['error']}")
         return resp.get("result")
 
-    # feature helpers (method name embeds the 1-based device index)
-    def get_float(self, feature: str):
-        return self.call(f"eye{self.device}.getFloat", feature)
+    # feature helpers (method name embeds the RPC object name, e.g. 'rgb1')
+    def _m(self, verb: str, device: str | None = None) -> str:
+        return f"eye{device or self.device}.{verb}"
 
-    def get_int(self, feature: str):
-        return self.call(f"eye{self.device}.getInt", feature)
+    def get_float(self, feature: str, device: str | None = None):
+        return self.call(self._m("getFloat", device), feature)
 
-    def get_string(self, feature: str):
-        return self.call(f"eye{self.device}.getString", feature)
+    def get_int(self, feature: str, device: str | None = None):
+        return self.call(self._m("getInt", device), feature)
 
-    def get_bool(self, feature: str):
-        return self.call(f"eye{self.device}.getBool", feature)
+    def get_string(self, feature: str, device: str | None = None):
+        return self.call(self._m("getString", device), feature)
 
-    def set_float(self, feature: str, value: float):
-        return self.call(f"eye{self.device}.setFloat", feature, float(value))
+    def get_bool(self, feature: str, device: str | None = None):
+        return self.call(self._m("getBool", device), feature)
 
-    def set_int(self, feature: str, value: int):
-        return self.call(f"eye{self.device}.setInt", feature, int(value))
+    def set_float(self, feature: str, value: float, device: str | None = None):
+        return self.call(self._m("setFloat", device), feature, float(value))
 
-    def set_string(self, feature: str, value: str):
-        return self.call(f"eye{self.device}.setString", feature, str(value))
+    def set_int(self, feature: str, value: int, device: str | None = None):
+        return self.call(self._m("setInt", device), feature, int(value))
 
-    def set_bool(self, feature: str, value: bool):
-        return self.call(f"eye{self.device}.setBool", feature, bool(value))
+    def set_string(self, feature: str, value: str, device: str | None = None):
+        return self.call(self._m("setString", device), feature, str(value))
+
+    def set_bool(self, feature: str, value: bool, device: str | None = None):
+        return self.call(self._m("setBool", device), feature, bool(value))
+
+    def is_readable(self, feature: str, device: str | None = None) -> bool:
+        try:
+            return bool(self.call(self._m("isReadable", device), feature))
+        except EyeError:
+            return False
+
+    def is_writeable(self, feature: str, device: str | None = None) -> bool:
+        try:
+            return bool(self.call(self._m("isWriteable", device), feature))
+        except EyeError:
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -1089,16 +1196,27 @@ if __name__ == "__main__":
     print("=" * 50)
     try:
         with SpecimCameraAPI() as cam:
-            for h in cam.handles:
-                print(f"handle {h}: {cam.device_name(h)!r}")
-                try:
-                    print("  model:", cam.get(h, "Camera.Model"))
-                    print("  device:", cam.get(h, "System.DeviceName"))
-                    print("  firmware:", cam.get(h, "System.FirmwareVersion"))
-                    print("  exposure (µs):", cam.get(h, "Camera.ExposureTime"))
-                    print("  FTP port:", cam.ftp_port())
-                except EyeError as e:
-                    print("  (feature read failed — camera not fully ready?)", e)
+            print("connected devices:")
+            for d in cam.devices():
+                print(f"   {d['name']!r:<15} handle={d['handle']}")
+            try:
+                sens = cam.handle_for("rgb1")
+            except EyeError:
+                sens = cam.handles[0]
+            try:
+                sys_h = cam.handle_for("photonfocus")
+            except EyeError:
+                sys_h = sens
+            try:
+                print("model:", cam.get(sens, "Camera.Model"))
+                print("device:", cam.get(sys_h, "System.DeviceName"))
+                print("firmware:", cam.get(sys_h, "System.FirmwareVersion"))
+                print("exposure (µs):", cam.get(sens, "Camera.ExposureTime"))
+                print("Camera.Count writeable:",
+                      cam.is_writeable(sens, "Camera.Count"))
+                print("FTP port:", cam.ftp_port())
+            except EyeError as e:
+                print("(feature read failed — camera not fully ready?)", e)
     except FileNotFoundError as e:
         print("ERROR:", e)
     except EyeError as e:
